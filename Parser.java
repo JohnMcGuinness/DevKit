@@ -4,9 +4,12 @@ import io.vavr.Tuple;
 import io.vavr.Tuple2;
 import io.vavr.control.Either;
 
+import java.text.ParseException;
 import java.util.List;
 import java.util.function.BiFunction;
 import java.util.function.Function;
+import java.util.function.Predicate;
+import java.util.function.Supplier;
 
 public class Parser<C, X, T> {
 
@@ -80,6 +83,67 @@ public class Parser<C, X, T> {
         return map2(Function::apply, parseFunc, parseArg);
     }
 
+    public static <C, X, T1, T2> Parser<C, X, T2> andThen(Function<T1, Parser<C, X, T2>> callback, Parser<C, X, T1> parser) {
+
+        return new Parser<C, X, T2>(s0 -> {
+
+            final PStep<C, X, T1> resultA = parser.parse.apply(s0);
+
+            if(resultA instanceof Bad<C, X, T1> badA ) {
+                return new Bad(badA.progress(), badA.bag());
+            }
+            else {
+                final Good<C, X, T1> goodA = (Good<C, X, T1>) resultA;
+                final Parser<C, X, T2> parserB = callback.apply(goodA.value());
+                final PStep<C, X, T2> resultB = parserB.parse.apply(goodA.state());
+
+                if(resultB instanceof Bad<C, X, T2> badB ) {
+                    return new Bad(goodA.progress() || badB.progress(), badB.bag());
+                }
+                else {
+                    final Good<C, X, T2> goodB = (Good<C, X, T2>) resultB;
+                    return new Good(goodA.progress() || goodB.progress(), goodB.value(), goodB.state());
+                }
+            }
+        });
+    }
+
+    public static <C, X, T> Parser<C, X, T> lazy(Supplier<Parser<C, X, T>> thunk) {
+        return new Parser<>(s -> thunk.get().parse.apply(s));
+    }
+
+    public static <C, X> Parser<C, X, Void> token(final Token<X> token) {
+
+        final boolean progress = !token.string().isEmpty();
+
+        return new Parser<>(s -> {
+
+            return null;
+        });
+    }
+
+    public static <C, X> Parser<C, X, Integer> int_( X expecting, X invalid) {
+        return number(new NumberConfig<>(
+            Either.right(Function.identity()),
+            Either.left(invalid),
+            Either.left(invalid),
+            Either.left(invalid),
+            Either.left(invalid),
+            invalid,
+            expecting));
+    }
+
+    public static <C, X> Parser<C, X, Float> float_( X expecting, X invalid) {
+        return number(new NumberConfig<>(
+            Either.right(Float::valueOf),
+            Either.left(invalid),
+            Either.left(invalid),
+            Either.left(invalid),
+            Either.right(Function.identity()),
+            invalid,
+            expecting));
+    }
+
     public static <C, X, T> Parser<C, X, T> number(final NumberConfig<X, T> config ) {
 
         return new Parser<>(s -> {
@@ -99,22 +163,23 @@ public class Parser<C, X, T> {
                     return finaliseInt(config.invalid(), config.binary(), baseOffset, consumeBase(2, baseOffset, s.source()), s);
                 }
                 else {
-                    return finaliseFloat();
+                    return finaliseFloat(config.invalid(), config.expecting(), config.int_(), config.float_(), Tuple.of(zeroOffset, 0), s);
                 }
             }
             else {
-                return finaliseFloat();
+                return finaliseFloat(config.invalid(), config.expecting(), config.int_(), config.float_(), consumeBase(10, s.offset(), s.source()), s);
             }
         });
     }
 
     private static boolean isAsciiCode(int code, int offset, String string) {
-        return string.codePointAt(offset) == code;
+        return offset < string.length() && string.codePointAt(offset) == code;
     }
 
-    private static Tuple2<Integer, Integer> consumeBase(int base, int offset, String string) {
+    static Tuple2<Integer, Integer> consumeBase(int base, int offset, String string) {
 
         int result = 0;
+
         for(; offset < string.length(); offset++) {
             int digit = string.charAt(offset) - 0x30;
             if(digit < 0  || base <= digit) {
@@ -130,7 +195,7 @@ public class Parser<C, X, T> {
 
         int total = 0;
 
-        while(offset < string.length()) {
+        for(; offset < string.length(); offset++) {
 
             final int code = string.charAt(offset);
 
@@ -146,42 +211,21 @@ public class Parser<C, X, T> {
             else {
                 break;
             }
-
-            offset++;
         }
-//
-//        for(; offset < string.length(); offset++) {
-//
-//            int code = string.charAt(offset);
-//
-//            if(0x30 <= code && code <= 0x39) {
-//                total = 16 * total + code - 0x30;
-//            }
-//            else if(0x41 <= code && code <= 0x46) {
-//                total = 16 * total + code - 55;
-//            }
-//            else if (0x61 <= code && code <= 0x66) {
-//                total = 16 * total + code - 87;
-//            }
-//            else {
-//                break;
-//            }
-//        }
 
         return Tuple.of(offset, total);
     }
 
     private static <C, X, T> PStep<C, X, T> finaliseFloat(
-            final X invalid,
-            final X expecting,
-            final Either<X, Function<Integer, T>> intSettings,
-            final Either<X, Function<Float, T>> floatSettings,
-            final Tuple2<Integer, Integer> intPair,
-            final State<C> s)
+        final X invalid,
+        final X expecting,
+        final Either<X, Function<Integer, T>> intSettings,
+        final Either<X, Function<Float, T>> floatSettings,
+        final Tuple2<Integer, Integer> intPair,
+        final State<C> s)
     {
         final int intOffset = intPair._1;
-//        final int floatOffset = consumeDotAndExp(intOffset, s.source());
-        final int floatOffset = 0;
+        final int floatOffset = consumeDotAndExp(intOffset, s.source());
 
         if(floatOffset < 0) {
             return new Bad<>(true, Bag.fromInfo(s.row(), (s.column() - (floatOffset + s.offset())), invalid, s.context()));
@@ -198,17 +242,26 @@ public class Parser<C, X, T> {
             }
             else {
                 final Function<Float, T> toValue = floatSettings.get();
+
+                try {
+                    final Float value = Float.valueOf(s.source().substring(s.offset(), floatOffset));
+
+                    return new Good<>(true, toValue.apply(value), bumpOffset(floatOffset, s));
+                }
+                catch (NumberFormatException e) {
+
+                }
                 return null;
             }
         }
     }
 
     private static <C, X, T> PStep<C, X, T> finaliseInt(
-            final X invalid,
-            final Either<X, Function<Integer, T>> handler,
-            final int startOffset,
-            final Tuple2<Integer, Integer> tuple,
-            final State<C> s)
+        final X invalid,
+        final Either<X, Function<Integer, T>> handler,
+        final int startOffset,
+        final Tuple2<Integer, Integer> tuple,
+        final State<C> s)
     {
         if(handler.isLeft()) {
             return new Bad<>(true, Bag.fromState(s, handler.getLeft()));
@@ -225,19 +278,95 @@ public class Parser<C, X, T> {
         }
     }
 
+    private static int consumeDotAndExp(int offset, String source) {
+        if(isAsciiCode(0x2E, offset, source)) {
+            return consumeExp(chompBase10((offset + 1), source), source);
+        }
+        else {
+            return consumeExp(offset, source);
+        }
+    }
+
+    private static int consumeExp(int offset, String source) {
+        if(isAsciiCode(0x65, offset, source) || isAsciiCode(0x45, offset, source)) {
+
+            int eOffset = offset + 1;
+            int expOffset = (isAsciiCode(0x2B, eOffset, source) || isAsciiCode(0x2D, eOffset, source)) ? eOffset + 1 : eOffset;
+            int newOffset = chompBase10(expOffset, source);
+
+            if(expOffset == newOffset) {
+                return -1 * newOffset;
+            }
+            else {
+                return newOffset;
+            }
+        }
+        else {
+            return offset;
+        }
+    }
+
+    private static int chompBase10(int offset, String string) {
+
+        for(; offset < string.length(); offset++) {
+            int code = string.codePointAt(offset);
+
+            if(code < 0x30 || 0x39 < code) {
+                return offset;
+            }
+        }
+
+        return offset;
+    }
+
+    private static <C, X> Parser<C, X, Void> chompWhile(Predicate<Character> isGood) {
+        return new Parser<>(s -> chompWhileHelp(isGood, s.offset(), s.row(), s.column(), s));
+    }
+
+    private static <C, X> PStep<C, X, Void> chompWhileHelp(Predicate<Character> isGood, int offset, int row, int column, State<C> s0) {
+
+        final int newOffset = isSubChar(isGood, offset, s0.source());
+
+        if(newOffset == -1) {
+            return new Good<>(s0.offset() < offset, null, new State<>(s0.source(), offset, s0.indent(), s0.context(), row, column));
+        }
+        else if(newOffset == -2) {
+            return chompWhileHelp(isGood, offset + 1, row + 1, 1, s0);
+        }
+        else {
+            return chompWhileHelp(isGood, newOffset, row, column + 1, s0);
+        }
+    }
+
+    public static <C, X> Parser<C, X, Void> spaces() {
+        return chompWhile(Character::isWhitespace);
+    }
+
+    private static int isSubChar(Predicate<Character> predicate, int offset, String string) {
+
+        return string.length() <= offset
+                ? -1
+                : (string.codePointAt(offset) & 0xF800) == 0xD800
+                    ? (predicate.test((char) string.codePointAt(offset))
+                            ? offset + 2 : -1)
+                    : (predicate.test((char) string.codePointAt(offset))
+                            ? ((string.charAt(offset) == '\n') ? -2 : (offset + 1))
+                            : -1);
+    }
+
     private static <C> State<C> bumpOffset(int newOffset, State<C> s) {
         return new State<>(s.source(), newOffset, s.indent(), s.context(), s.row(), s.column() + (newOffset - s.offset()));
     }
 }
 
 record NumberConfig<X, T>(
-        Either<X, Function<Integer, T>> int_,
-        Either<X, Function<Integer, T>> hex,
-        Either<X, Function<Integer, T>> octal,
-        Either<X, Function<Integer, T>> binary,
-        Either<X, Function<Float, T>> float_,
-        X invalid,
-        X expecting) {}
+    Either<X, Function<Integer, T>> int_,
+    Either<X, Function<Integer, T>> hex,
+    Either<X, Function<Integer, T>> octal,
+    Either<X, Function<Integer, T>> binary,
+    Either<X, Function<Float, T>> float_,
+    X invalid,
+    X expecting) {}
 
 record State<T>(String source, int offset, int indent, List<Located<T>> context, int row, int column) {}
 
@@ -270,6 +399,8 @@ sealed interface Bag<C, X> permits Empty, AddRight, Append {
         }
     }
 }
+
+record Token<X>(String string, X expecting) {}
 
 record Empty<C, X>() implements Bag<C, X> {}
 
