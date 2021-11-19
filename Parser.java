@@ -2,10 +2,12 @@ package com.github.johnmcguinness.simpleparser;
 
 import io.vavr.Tuple;
 import io.vavr.Tuple2;
+import io.vavr.Tuple3;
 import io.vavr.control.Either;
 
-import java.text.ParseException;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.function.Predicate;
@@ -85,12 +87,12 @@ public class Parser<C, X, T> {
 
     public static <C, X, T1, T2> Parser<C, X, T2> andThen(Function<T1, Parser<C, X, T2>> callback, Parser<C, X, T1> parser) {
 
-        return new Parser<C, X, T2>(s0 -> {
+        return new Parser<>(s0 -> {
 
             final PStep<C, X, T1> resultA = parser.parse.apply(s0);
 
             if(resultA instanceof Bad<C, X, T1> badA ) {
-                return new Bad(badA.progress(), badA.bag());
+                return new Bad<>(badA.progress(), badA.bag());
             }
             else {
                 final Good<C, X, T1> goodA = (Good<C, X, T1>) resultA;
@@ -98,11 +100,11 @@ public class Parser<C, X, T> {
                 final PStep<C, X, T2> resultB = parserB.parse.apply(goodA.state());
 
                 if(resultB instanceof Bad<C, X, T2> badB ) {
-                    return new Bad(goodA.progress() || badB.progress(), badB.bag());
+                    return new Bad<>(goodA.progress() || badB.progress(), badB.bag());
                 }
                 else {
                     final Good<C, X, T2> goodB = (Good<C, X, T2>) resultB;
-                    return new Good(goodA.progress() || goodB.progress(), goodB.value(), goodB.state());
+                    return new Good<>(goodA.progress() || goodB.progress(), goodB.value(), goodB.state());
                 }
             }
         });
@@ -118,7 +120,35 @@ public class Parser<C, X, T> {
 
         return new Parser<>(s -> {
 
-            return null;
+            final Tuple3<Integer, Integer, Integer> triple = isSubString(token.string(), s.offset(), s.row(), s.column(), s.source());
+
+            final int newOffset = triple._1;
+            final int newRow = triple._2;
+            final int newCol = triple._3;
+
+            if(newOffset == -1) {
+                return new Bad<>(false, Bag.fromState(s, token.expecting()));
+            }
+            else {
+                return new Good<>(progress, null, new State<>(s.source(), newOffset, s.indent(), s.context(), newRow, newCol));
+            }
+        });
+    }
+
+    public static <C, X> Parser<C, X, Void> symbol(final Token<X> token) {
+        return token(token);
+    }
+
+    public static <C, X> Parser<C, X, Void> end(X expecting) {
+
+        return new Parser<>(s -> {
+
+            if(s.source().length() == s.offset()) {
+                return new Good<>(false, null, s);
+            }
+            else {
+                return new Bad<>(false, Bag.fromState(s, expecting));
+            }
         });
     }
 
@@ -170,6 +200,99 @@ public class Parser<C, X, T> {
                 return finaliseFloat(config.invalid(), config.expecting(), config.int_(), config.float_(), consumeBase(10, s.offset(), s.source()), s);
             }
         });
+    }
+
+    public static <C, X, T> Parser<C, X, T> inContext(final C context, final Parser<C, X, T> parser) {
+
+        return new Parser<>(s0 -> {
+
+            final List<Located<C>> newContextStack = new ArrayList<>(s0.context());
+            if(newContextStack.isEmpty()) {
+                newContextStack.add(new Located<>(s0.row(), s0.column(), context));
+            }
+            else {
+                newContextStack.set(0, new Located<>(s0.row(), s0.column(), context));
+            }
+
+            final PStep<C, X, T> result =  parser.parse.apply(changeContext(newContextStack, s0));
+
+            if(result instanceof Good<C, X, T> good) {
+                return new Good<>(good.progress(), good.value(), changeContext(s0.context(), good.state()));
+            }
+            else {
+                return result;
+            }
+        });
+    }
+
+    public static <C, X> Parser<C, X, Void> keyword(final Token<X> token) {
+
+        final String kwd = token.string();
+        final X expecting = token.expecting();
+
+        final boolean progress = !kwd.isEmpty();
+
+        return new Parser<>(s -> {
+
+            final Tuple3<Integer, Integer, Integer> triple = isSubString(token.string(), s.offset(), s.row(), s.column(), s.source());
+
+            final int newOffset = triple._1;
+            final int newRow = triple._2;
+            final int newCol = triple._3;
+
+            if(newOffset == -1 || 0<= isSubChar(c -> Character.isLetterOrDigit(c) || c == '_', newOffset, s.source())) {
+                return new Bad<>(false, Bag.fromState(s, expecting));
+            }
+            else {
+                return new Good<>(progress, null , new State<>(s.source(), newOffset, s.indent(), s.context(), newRow, newCol));
+            }
+        });
+    }
+
+    public static <C, X> Parser<C, X, String> variable(VariableConfig<X> varConfig) {
+
+        return new Parser<>(s -> {
+
+            final int firstOffset = isSubChar(varConfig.start(), s.offset(), s.source());
+
+            if(firstOffset == -1) {
+                return new Bad<>(false, Bag.fromState(s, varConfig.expecting()));
+            }
+            else {
+
+                final State<C> s1 = firstOffset == -2
+                    ? varHelp(varConfig.inner(), s.offset() + 1, s.row() + 1, 1, s.source(), s.indent(), s.context())
+                    : varHelp(varConfig.inner(), firstOffset, s.row(), s.column() + 1, s.source(), s.indent(), s.context());
+
+                final String name = s.source().substring(s.offset(), s1.offset());
+
+                if(varConfig.reserved().contains(name)) {
+                    return new Bad<>(false, Bag.fromState(s, varConfig.expecting()));
+                }
+                else {
+                    return new Good<>(true, name, s1);
+                }
+            }
+        });
+    }
+
+    private static <C> State<C> varHelp(Predicate<Character> isGood, int offset, int row, int column, String source, int indent, List<Located<C>> context) {
+
+        final int newOffset = isSubChar(isGood, offset, source);
+
+        if(newOffset == -1) {
+            return new State<>(source, offset, indent, context, row, column);
+        }
+        else if(newOffset == -2) {
+            return varHelp(isGood, offset + 1, row + 1, 1, source, indent, context);
+        }
+        else {
+            return varHelp(isGood, newOffset, row, column + 1, source, indent, context);
+        }
+    }
+
+    private static <C> State<C> changeContext(final List<Located<C>> newContext, State<C> s) {
+        return new State<>(s.source(), s.offset(), s.indent(), newContext, s.row(), s.column());
     }
 
     private static boolean isAsciiCode(int code, int offset, String string) {
@@ -348,10 +471,28 @@ public class Parser<C, X, T> {
                 ? -1
                 : (string.codePointAt(offset) & 0xF800) == 0xD800
                     ? (predicate.test((char) string.codePointAt(offset))
-                            ? offset + 2 : -1)
+                            ? offset + 2
+                            : -1)
                     : (predicate.test((char) string.codePointAt(offset))
                             ? ((string.charAt(offset) == '\n') ? -2 : (offset + 1))
                             : -1);
+    }
+
+    static Tuple3<Integer, Integer, Integer> isSubString(final String shorterString, int offset, int row, int col, String longerString) {
+
+        final String substring =  longerString.substring(offset, offset + shorterString.length());
+
+        if(shorterString.equals(substring)) {
+
+            final int newOffset = offset + substring.length();
+            final int newRow = row + ((int) substring.lines().count() - 1);
+            final int newColumn = ((substring.lastIndexOf('\n') == -1) ? col + substring.length() : substring.length() - substring.lastIndexOf('\n'));
+
+            return Tuple.of(newOffset, newRow, newColumn);
+        }
+        else {
+            return Tuple.of(-1, row, col);
+        }
     }
 
     private static <C> State<C> bumpOffset(int newOffset, State<C> s) {
@@ -367,6 +508,8 @@ record NumberConfig<X, T>(
     Either<X, Function<Float, T>> float_,
     X invalid,
     X expecting) {}
+
+record VariableConfig<X>(Predicate<Character> start, Predicate<Character> inner, Set<String> reserved, X expecting) {}
 
 record State<T>(String source, int offset, int indent, List<Located<T>> context, int row, int column) {}
 
