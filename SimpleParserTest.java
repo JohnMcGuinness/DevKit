@@ -5,14 +5,16 @@ import io.vavr.control.Either;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Set;
 import java.util.function.Function;
 
 import static com.github.johnmcguinness.simpleparser.Parser.consumeBase;
+import static com.github.johnmcguinness.simpleparser.Parser.inContext;
+import static com.github.johnmcguinness.simpleparser.Parser.isSubString;
 import static com.github.johnmcguinness.simpleparser.Parser.keep;
 import static com.github.johnmcguinness.simpleparser.Parser.succeed;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class ParserTest {
@@ -189,6 +191,122 @@ public class ParserTest {
         assertTrue(Parser.run(Parser.spaces(), newLine).isRight());
         assertTrue(Parser.run(Parser.spaces(), carriageReturn).isRight());
         assertTrue(Parser.run(Parser.spaces(), space).isRight());
+    }
+
+    @Test
+    public void tokenTest() {
+
+        final Parser<Void, String, Void> token = Parser.token(new Token<>("let", "expecting let"));
+
+        assertTrue(Parser.run(token, "let").isRight());
+
+        final Either<List<DeadEnd<Void, String>>, Void> result = Parser.run(token, "abc");
+
+        assertTrue(result.isLeft());
+        assertEquals(1, result.getLeft().size());
+
+        final DeadEnd<Void, String> deadEnd = result.getLeft().get(0);
+
+        assertEquals("expecting let", deadEnd.problem());
+    }
+
+    @Test
+    public void symbolTest() {
+
+        final Parser<Void, String, Void> symbol = Parser.symbol(new Token<>("let", "expecting let"));
+
+        assertTrue(Parser.run(symbol, "let").isRight());
+
+        final Either<List<DeadEnd<Void, String>>, Void> result = Parser.run(symbol, "abc");
+
+        assertTrue(result.isLeft());
+        assertEquals(1, result.getLeft().size());
+
+        final DeadEnd<Void, String> deadEnd = result.getLeft().get(0);
+
+        assertEquals("expecting let", deadEnd.problem());
+    }
+
+    @Test
+    public void endTest() {
+
+        final Parser<Void, String, Void> end = Parser.end("expecting end");
+
+        assertTrue(Parser.run(end, "").isRight());
+
+        final Either<List<DeadEnd<Void, String>>, Void> result = Parser.run(end, "abc");
+
+        assertTrue(result.isLeft());
+        assertEquals(1, result.getLeft().size());
+
+        final DeadEnd<Void, String> deadEnd = result.getLeft().get(0);
+
+        assertEquals("expecting end", deadEnd.problem());
+    }
+
+    @Test
+    public void inContextTest() {
+
+        final Either<List<DeadEnd<String, String>>, String> result
+            = Parser.run(inContext("a demo context", Parser.problem("this is a problem")), "");
+
+        assertTrue(result.isLeft());
+        assertEquals(1, result.getLeft().size());
+        assertEquals(
+            new DeadEnd<>(1, 1, "this is a problem", List.of(new Located<>(1, 1, "a demo context"))),
+            result.getLeft().get(0)
+        );
+    }
+
+    @Test
+    public void keywordTest() {
+
+        final Parser<Void, String, Void> let = Parser.keyword(new Token<>("let", "expected let"));
+
+        final Either<List<DeadEnd<Void, String>>, Void> successful = Parser.run(let, "let");
+
+        assertTrue(successful.isRight());
+
+        final Either<List<DeadEnd<Void, String>>, Void> result = Parser.run(let, "xyz");
+
+        assertTrue(result.isLeft());
+        assertEquals(1, result.getLeft().size());
+        assertEquals(
+            new DeadEnd<>(1, 1, "expected let", List.of()),
+            result.getLeft().get(0)
+        );
+    }
+
+    @Test
+    public void variableTest() {
+
+        final Parser<Void, String, String> variable
+            = Parser.variable(new VariableConfig<>(Character::isLowerCase, Character::isAlphabetic, Set.of("let"), "an expecting message"));
+
+        final Either<List<DeadEnd<Void, String>>, String> result = Parser.run(variable, "letter ");
+
+        assertTrue(result.isRight());
+        assertEquals("letter", result.get());
+    }
+
+    @Test
+    public void isSubStringTest() {
+
+        final String multiline = """
+            a
+            bcd
+            """;
+
+        final String multiByteCharacter = "a☃️d";
+
+        assertEquals(Tuple.of(3,1,4), isSubString("bc", 1, 1, 2, "abcd"));
+        assertEquals(Tuple.of(1,1,2), isSubString("a", 0, 1, 1, "abcd"));
+        assertEquals(Tuple.of(4,1,5), isSubString("d", 3, 1, 4, "abcd"));
+
+        assertEquals(Tuple.of(3,1,4), isSubString("☃️", 1, 1, 2, multiByteCharacter));
+
+        assertEquals(Tuple.of(3,2,2), isSubString("b", 2, 2, 1, multiline));
+        assertEquals(Tuple.of(5,2,4), isSubString("d", 4, 2, 3, multiline));
     }
 
     @Test
